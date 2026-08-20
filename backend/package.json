@@ -1,0 +1,41 @@
+{
+  "name": "api-gateway-backend",
+  "version": "1.0.0",
+  "description": "High-performance API Gateway and Rate Limiter Backend with PostgreSQL and Redis",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "migrate": "node src/db/migrate.js",
+    "seed": "node src/db/seed.js",
+    "db:init": "node src/db/migrate.js && node src/db/seed.js",
+    "test:db": "node src/db/test-db.js",
+    "test:auth": "node src/tests/test-auth.js",
+    "test:ratelimit": "node src/tests/test-ratelimit.js",
+    "test:proxy": "node src/tests/test-proxy.js",
+    "test:registration": "node src/tests/test-registration.js",
+    "test:all": "node src/tests/test-all.js"
+  },
+  "keywords": [
+    "api-gateway",
+    "rate-limiter",
+    "redis",
+    "postgresql",
+    "reverse-proxy",
+    "express",
+    "authentication",
+    "middleware"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "http-proxy-middleware": "^3.0.0",
+    "ioredis": "^5.4.1",
+    "morgan": "^1.10.0",
+    "pg": "^8.12.0"
+  }
+}
