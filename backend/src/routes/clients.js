@@ -5,6 +5,12 @@ const { getRedisClient } = require('../config/redis');
 
 const router = express.Router();
 
+// Limits mirror the column sizes in schema.sql so bad input is rejected with 400 instead of a DB error
+const MAX_NAME_LENGTH = 100;
+const MAX_EMAIL_LENGTH = 255;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * Generates a high-entropy, cryptographically secure API key
  * Format: ak_live_{tier}_{32-char-random-hex}
@@ -14,43 +20,77 @@ function generateApiKey(tier) {
   return `ak_live_${tier}_${randomHex}`;
 }
 
+/**
+ * Maps a clients row (optionally joined with rate_limit_rules) to the camelCase API shape
+ */
+function formatClient(row) {
+  const client = {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    apiKey: row.api_key,
+    tier: row.tier,
+    isActive: row.is_active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+  if (row.max_requests_per_minute !== undefined) {
+    client.rateLimit = {
+      maxRequestsPerMinute: row.max_requests_per_minute,
+      burstCapacity: row.burst_capacity,
+      description: row.tier_description,
+    };
+  }
+  return client;
+}
+
+function badRequest(res, message) {
+  return res.status(400).json({
+    success: false,
+    statusCode: 400,
+    error: 'Bad Request',
+    message,
+  });
+}
+
+function clientNotFound(res) {
+  return res.status(404).json({
+    success: false,
+    statusCode: 404,
+    error: 'Not Found',
+    message: 'Client not found.',
+  });
+}
+
 // ----------------------------------------------------------------------------
 // 1. POST /api/v1/clients/register - Register new client & generate API key
 // ----------------------------------------------------------------------------
 router.post('/register', async (req, res) => {
-  const { name, email, tier = 'free' } = req.body;
+  const { name, email, tier = 'free' } = req.body || {};
 
   // Validation
-  if (!name || typeof name !== 'string' || name.trim().length === 0) {
-    return res.status(400).json({
-      success: false,
-      statusCode: 400,
-      error: 'Bad Request',
-      message: 'Name is required.',
-    });
+  if (typeof name !== 'string' || name.trim().length === 0) {
+    return badRequest(res, 'Name is required.');
+  }
+  if (name.trim().length > MAX_NAME_LENGTH) {
+    return badRequest(res, `Name must be at most ${MAX_NAME_LENGTH} characters.`);
   }
 
-  if (!email || typeof email !== 'string' || !email.includes('@')) {
-    return res.status(400).json({
-      success: false,
-      statusCode: 400,
-      error: 'Bad Request',
-      message: 'A valid email address is required.',
-    });
+  const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  if (!EMAIL_REGEX.test(normalizedEmail) || normalizedEmail.length > MAX_EMAIL_LENGTH) {
+    return badRequest(res, 'A valid email address is required.');
   }
 
-  const normalizedTier = String(tier).toLowerCase().trim();
+  if (typeof tier !== 'string') {
+    return badRequest(res, 'Tier must be a string. Valid tiers are: free, pro, enterprise.');
+  }
+  const normalizedTier = tier.toLowerCase().trim();
 
   try {
     // 1. Verify tier exists in rate_limit_rules
     const tierCheck = await query('SELECT tier, max_requests_per_minute, burst_capacity FROM rate_limit_rules WHERE tier = $1;', [normalizedTier]);
     if (tierCheck.rowCount === 0) {
-      return res.status(400).json({
-        success: false,
-        statusCode: 400,
-        error: 'Bad Request',
-        message: `Invalid subscription tier "${tier}". Valid tiers are: free, pro, enterprise.`,
-      });
+      return badRequest(res, `Invalid subscription tier "${tier}". Valid tiers are: free, pro, enterprise.`);
     }
 
     const tierRule = tierCheck.rows[0];
@@ -65,7 +105,7 @@ router.post('/register', async (req, res) => {
       RETURNING id, name, email, api_key, tier, is_active, created_at, updated_at;
     `;
 
-    const result = await query(insertSql, [name.trim(), email.trim().toLowerCase(), apiKey, normalizedTier]);
+    const result = await query(insertSql, [name.trim(), normalizedEmail, apiKey, normalizedTier]);
     const newClient = result.rows[0];
 
     return res.status(201).json({
@@ -93,7 +133,7 @@ router.post('/register', async (req, res) => {
         success: false,
         statusCode: 409,
         error: 'Conflict',
-        message: `A client with email "${email}" is already registered.`,
+        message: `A client with email "${normalizedEmail}" is already registered.`,
       });
     }
 
@@ -113,7 +153,7 @@ router.post('/register', async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     const sql = `
-      SELECT 
+      SELECT
         c.id,
         c.name,
         c.email,
@@ -131,21 +171,7 @@ router.get('/', async (req, res) => {
     `;
 
     const result = await query(sql);
-    const clients = result.rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      email: row.email,
-      apiKey: row.api_key,
-      tier: row.tier,
-      isActive: row.is_active,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      rateLimit: {
-        maxRequestsPerMinute: row.max_requests_per_minute,
-        burstCapacity: row.burst_capacity,
-        description: row.tier_description,
-      },
-    }));
+    const clients = result.rows.map(formatClient);
 
     return res.json({
       success: true,
@@ -168,37 +194,34 @@ router.get('/', async (req, res) => {
 // ----------------------------------------------------------------------------
 router.patch('/:id/toggle-status', async (req, res) => {
   const { id } = req.params;
+  if (!UUID_REGEX.test(id)) {
+    return clientNotFound(res);
+  }
 
   try {
     const updateSql = `
-      UPDATE clients 
+      UPDATE clients
       SET is_active = NOT is_active,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = $1
-      RETURNING id, name, email, api_key, tier, is_active, updated_at;
+      RETURNING id, name, email, api_key, tier, is_active, created_at, updated_at;
     `;
 
     const result = await query(updateSql, [id]);
     if (result.rowCount === 0) {
-      return res.status(404).json({
-        success: false,
-        statusCode: 404,
-        error: 'Not Found',
-        message: 'Client not found.',
-      });
+      return clientNotFound(res);
     }
 
     const updated = result.rows[0];
-    const redis = getRedisClient();
     if (!updated.is_active) {
       // Clear any rate limit key in redis when deactivated
-      await redis.del(`ratelimit:${updated.api_key}`);
+      await getRedisClient().del(`ratelimit:${updated.api_key}`);
     }
 
     return res.json({
       success: true,
       message: `Client ${updated.is_active ? 'activated' : 'revoked'} successfully.`,
-      client: updated,
+      client: formatClient(updated),
     });
   } catch (error) {
     console.error('[Toggle Status Error]:', error);
@@ -216,18 +239,17 @@ router.patch('/:id/toggle-status', async (req, res) => {
 // ----------------------------------------------------------------------------
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
+  if (!UUID_REGEX.test(id)) {
+    return clientNotFound(res);
+  }
 
   try {
-    const selectRes = await query('SELECT api_key FROM clients WHERE id = $1;', [id]);
-    if (selectRes.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Client not found.' });
+    const result = await query('DELETE FROM clients WHERE id = $1 RETURNING api_key;', [id]);
+    if (result.rowCount === 0) {
+      return clientNotFound(res);
     }
 
-    const apiKey = selectRes.rows[0].api_key;
-    await query('DELETE FROM clients WHERE id = $1;', [id]);
-
-    const redis = getRedisClient();
-    await redis.del(`ratelimit:${apiKey}`);
+    await getRedisClient().del(`ratelimit:${result.rows[0].api_key}`);
 
     return res.json({
       success: true,
@@ -235,7 +257,12 @@ router.delete('/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('[Delete Client Error]:', error);
-    return res.status(500).json({ success: false, error: error.message });
+    return res.status(500).json({
+      success: false,
+      statusCode: 500,
+      error: 'Internal Server Error',
+      message: 'Failed to delete client.',
+    });
   }
 });
 

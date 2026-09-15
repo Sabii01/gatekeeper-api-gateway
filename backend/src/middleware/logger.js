@@ -139,10 +139,19 @@ function getTrafficMetrics() {
 }
 
 /**
- * Clears buffered logs
+ * Clears buffered logs and resets aggregated metrics so the dashboard starts from zero
  */
 function clearTrafficLogs() {
   logBuffer.length = 0;
+  metrics.totalRequests = 0;
+  metrics.successfulRequests = 0;
+  metrics.clientErrors = 0;
+  metrics.rateLimited429 = 0;
+  metrics.serverErrors = 0;
+  metrics.totalLatencyMs = 0;
+  for (const tier of Object.keys(metrics.tierCounts)) {
+    metrics.tierCounts[tier] = 0;
+  }
   return true;
 }
 
@@ -151,4 +160,5 @@ module.exports = {
   getRecentLogs,
   getTrafficMetrics,
   clearTrafficLogs,
+  MAX_LOGS,
 };

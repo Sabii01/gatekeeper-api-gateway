@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { apiKeyAuth } = require('./middleware/auth');
 const { rateLimiter } = require('./middleware/rateLimiter');
-const { requestLogger, getRecentLogs, getTrafficMetrics, clearTrafficLogs } = require('./middleware/logger');
+const { requestLogger, getRecentLogs, getTrafficMetrics, clearTrafficLogs, MAX_LOGS } = require('./middleware/logger');
 const { proxyForwarder } = require('./proxy/forwarder');
 const { testConnection } = require('./config/db');
 const { getRedisClient } = require('./config/redis');
@@ -94,8 +94,10 @@ app.use('/api/v1/admin/metrics', adminMetricsRouter);
 
 // Admin Traffic Logs (for Dashboard)
 app.get('/api/v1/admin/logs', (req, res) => {
-  const limit = parseInt(req.query.limit || '100', 10);
-  const tier = req.query.tier || null;
+  // Clamp to the ring buffer size; fall back to the default for missing/non-numeric values
+  const requested = parseInt(req.query.limit, 10);
+  const limit = Number.isNaN(requested) ? 100 : Math.min(Math.max(requested, 1), MAX_LOGS);
+  const tier = typeof req.query.tier === 'string' && req.query.tier ? req.query.tier : null;
   res.json({
     success: true,
     logs: getRecentLogs(limit, tier),
@@ -111,16 +113,37 @@ app.get('/api/v1/admin/stats', (req, res) => {
 });
 
 // Admin Reset Rate Limit Key (Helper for testing)
-app.post('/api/v1/admin/ratelimit/reset', async (req, res) => {
-  const { apiKey } = req.body;
-  const redis = getRedisClient();
-  if (apiKey) {
-    await redis.del(`ratelimit:${apiKey}`);
-    return res.json({ success: true, message: `Rate limit reset for API key: ${apiKey}` });
-  } else {
-    await redis.flushall();
+app.post('/api/v1/admin/ratelimit/reset', async (req, res, next) => {
+  try {
+    const { apiKey } = req.body || {};
+    const redis = getRedisClient();
+
+    if (apiKey !== undefined && apiKey !== null) {
+      if (typeof apiKey !== 'string' || apiKey.trim().length === 0) {
+        return res.status(400).json({
+          success: false,
+          statusCode: 400,
+          error: 'Bad Request',
+          message: 'apiKey must be a non-empty string (or omitted to reset all rate limits).',
+        });
+      }
+      await redis.del(`ratelimit:${apiKey.trim()}`);
+      return res.json({ success: true, message: `Rate limit reset for API key: ${apiKey.trim()}` });
+    }
+
+    // Only remove the gateway's own rate limit keys; never FLUSHALL a Redis that may be shared
+    const keys = await redis.keys('ratelimit:*');
+    if (keys.length > 0) {
+      await redis.del(...keys);
+    }
     clearTrafficLogs();
-    return res.json({ success: true, message: 'All rate limits and traffic logs flushed.' });
+    return res.json({
+      success: true,
+      message: 'All rate limits and traffic logs flushed.',
+      keysRemoved: keys.length,
+    });
+  } catch (err) {
+    return next(err);
   }
 });
 
@@ -197,12 +220,24 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
+  // body-parser errors (malformed JSON, payload too large) carry a 4xx status and a safe message
+  const status = Number.isInteger(err.status || err.statusCode) ? err.status || err.statusCode : 500;
+
+  if (status >= 400 && status < 500) {
+    return res.status(status).json({
+      success: false,
+      statusCode: status,
+      error: err.type === 'entity.parse.failed' ? 'Bad Request' : err.name || 'Bad Request',
+      message: err.type === 'entity.parse.failed' ? 'Request body contains malformed JSON.' : err.message,
+    });
+  }
+
   console.error('[Unhandled Gateway Error]:', err);
   res.status(500).json({
     success: false,
     statusCode: 500,
     error: 'Internal Server Error',
-    message: err.message || 'An unexpected error occurred in the gateway.',
+    message: 'An unexpected error occurred in the gateway.',
   });
 });
 

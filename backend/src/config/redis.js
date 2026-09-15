@@ -56,9 +56,12 @@ class InMemoryRedis {
 
   async set(key, value, ...args) {
     this.store.set(key, String(value));
-    if (args.length >= 2 && args[0].toUpperCase() === 'EX') {
+    if (args.length >= 2 && String(args[0]).toUpperCase() === 'EX') {
       const seconds = parseInt(args[1], 10);
       this.ttls.set(key, Date.now() + seconds * 1000);
+    } else {
+      // Like Redis, a plain SET discards any previous TTL
+      this.ttls.delete(key);
     }
     return 'OK';
   }
@@ -83,7 +86,9 @@ class InMemoryRedis {
   }
 
   async keys(pattern = '*') {
-    const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
+    // Translate the Redis glob into a regex, escaping everything except the * and ? wildcards
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+    const regex = new RegExp('^' + escaped + '$');
     const result = [];
     for (const key of this.store.keys()) {
       this._cleanExpired(key);
@@ -190,7 +195,19 @@ class ResilientRedisClient {
 
   async keys(pattern = '*') {
     const client = await this._getActive();
-    return client.keys(pattern);
+    if (client === this.inMemory) {
+      return client.keys(pattern);
+    }
+
+    // Use SCAN instead of KEYS so a large keyspace never blocks the live Redis server
+    const found = new Set();
+    let cursor = '0';
+    do {
+      const [nextCursor, batch] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 200);
+      cursor = nextCursor;
+      batch.forEach((key) => found.add(key));
+    } while (cursor !== '0');
+    return [...found];
   }
 }
 
