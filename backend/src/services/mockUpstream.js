@@ -95,7 +95,20 @@ upstreamApp.all('/inspect', (req, res) => {
     clientId: req.headers['x-gateway-client-id'] || null,
     body: req.body,
     method: req.method,
+    url: req.originalUrl,
+    query: req.query,
   });
+});
+
+// Plain-text endpoint (verifies that non-JSON upstream responses pass through the gateway untouched)
+upstreamApp.get('/text', (req, res) => {
+  res.type('text/plain').send('plain upstream response');
+});
+
+// Slow endpoint (verifies gateway timeout handling)
+upstreamApp.get('/slow', (req, res) => {
+  const delayMs = Math.min(parseInt(req.query.ms || '2000', 10) || 2000, 30000);
+  setTimeout(() => res.json({ service: 'Slow Microservice', delayMs }), delayMs);
 });
 
 /**
