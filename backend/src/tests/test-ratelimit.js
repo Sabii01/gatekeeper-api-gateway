@@ -69,12 +69,12 @@ async function runRateLimitTests() {
       const s = app.listen(TEST_PORT, () => resolve(s));
     });
 
-    const redis = getRedisClient();
-    // Flush test keys before testing
-    await redis.flushall();
-
     const freeApiKey = 'ak_live_free_alice_84920482'; // Free Tier (10 req/min)
     const proApiKey = 'ak_live_pro_bob_93810294';    // Pro Tier (60 req/min)
+
+    // Clear only this suite's rate limit keys (never FLUSHALL a Redis that may be shared)
+    const redis = getRedisClient();
+    await redis.del(`ratelimit:${freeApiKey}`, `ratelimit:${proApiKey}`);
 
     // ------------------------------------------------------------------------
     // TEST 1: Standard Rate Limit Headers on 200 OK

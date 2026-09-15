@@ -157,8 +157,11 @@ async function runRegistrationTests() {
     });
 
     assert(
-      resToggle.status === 200 && resToggle.body.client.is_active === false,
-      'PATCH /api/v1/clients/:id/toggle-status revokes API key'
+      resToggle.status === 200 &&
+        resToggle.body.client.isActive === false &&
+        resToggle.body.client.apiKey === generatedApiKey,
+      'PATCH /api/v1/clients/:id/toggle-status revokes API key and returns camelCase client',
+      JSON.stringify(resToggle.body)
     );
 
     // Blocked after revocation
@@ -190,6 +193,25 @@ async function runRegistrationTests() {
       'GET /api/v1/admin/metrics returns live Redis counters, active windows, and traffic metrics',
       JSON.stringify(resMetrics.body)
     );
+
+    // ------------------------------------------------------------------------
+    // TEST 7: Delete Client (also cleans up this suite's test data)
+    // ------------------------------------------------------------------------
+    console.log('\n[Test Suite 5] Client Deletion & Cleanup');
+    const resDelete = await makeRequest({
+      method: 'DELETE',
+      path: `/api/v1/clients/${registeredClientId}`,
+    });
+    const resListAfter = await makeRequest({ path: '/api/v1/clients' });
+
+    assert(
+      resDelete.status === 200 &&
+        resDelete.body.success === true &&
+        !resListAfter.body.clients.some((c) => c.id === registeredClientId),
+      'DELETE /api/v1/clients/:id removes the client from PostgreSQL',
+      JSON.stringify(resDelete.body)
+    );
+    if (resDelete.status === 200) registeredClientId = null;
 
     console.log('\n====================================================');
     console.log(`🏁 Registration & Metrics Results: ${passedCount} Passed, ${failedCount} Failed`);
