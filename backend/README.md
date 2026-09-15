@@ -34,16 +34,19 @@ This backend service implements the database schemas and data provisioning requi
 
 ```bash
 # 1. Run Migration (creates database and executes schema.sql)
-npm run migrate
+npm run db:migrate        # alias: npm run migrate
 
 # 2. Run Seeder (populates default tiers & test API keys)
-npm run seed
+npm run db:seed           # alias: npm run seed
 
 # 3. Initialize DB (Migrate + Seed)
 npm run db:init
 
 # 4. Verify & Test DB connection and queries
 npm run test:db
+
+# 5. Run every test suite (DB, auth, rate limiter, proxy, registration, hardening)
+npm test
 ```
 
 ---
