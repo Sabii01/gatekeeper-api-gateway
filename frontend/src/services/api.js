@@ -82,11 +82,13 @@ export async function sendGatewayRequest({ path, method = 'GET', apiKey, body = 
     const endTime = performance.now();
     const roundTripLatencyMs = Math.round(endTime - startTime);
 
-    let data = null;
+    // Read the body once: calling res.text() after a failed res.json() throws "body already used"
+    const rawBody = await res.text();
+    let data = rawBody;
     try {
-      data = await res.json();
+      data = rawBody ? JSON.parse(rawBody) : null;
     } catch (e) {
-      data = await res.text();
+      // Non-JSON response (e.g. text/plain from an upstream service) is shown as-is
     }
 
     // Extract rate limit headers from HTTP headers OR JSON payload fallback

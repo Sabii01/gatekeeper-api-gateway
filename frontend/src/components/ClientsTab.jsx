@@ -26,9 +26,15 @@ export default function ClientsTab({ clients, onClientsUpdated }) {
   const [newlyCreatedClient, setNewlyCreatedClient] = useState(null);
 
   const handleCopy = (key) => {
-    navigator.clipboard.writeText(key);
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 2000);
+    // navigator.clipboard is unavailable outside secure contexts (e.g. http://<LAN-IP>:3000)
+    if (!navigator.clipboard) return;
+    navigator.clipboard
+      .writeText(key)
+      .then(() => {
+        setCopiedKey(key);
+        setTimeout(() => setCopiedKey(null), 2000);
+      })
+      .catch((err) => console.error('Failed to copy API key:', err));
   };
 
   const toggleReveal = (id) => {

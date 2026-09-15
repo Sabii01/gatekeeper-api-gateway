@@ -47,8 +47,6 @@ export default function PlaygroundTab({ clients, metrics, onMetricsUpdate }) {
   const [isWindowActive, setIsWindowActive] = useState(false);
   const [isRateBlocked, setIsRateBlocked] = useState(false);
 
-  const isInitialized = useRef(false);
-
   // Current selected client object
   const selectedClient = clients.find((c) => c.id === selectedClientId) || null;
 
@@ -77,70 +75,66 @@ export default function PlaygroundTab({ clients, metrics, onMetricsUpdate }) {
     return () => clearInterval(interval);
   }, []);
 
-  // Initialize client selection on mount
+  // Ensure a valid client is selected when clients list is loaded/updated
   useEffect(() => {
     if (clients.length === 0) return;
 
-    if (!isInitialized.current) {
-      let targetClient = clients.find((c) => c.id === selectedClientId);
-
-      if (!targetClient) {
-        targetClient = clients.find((c) => c.tier === 'pro' && c.isActive) || clients[0];
-        if (targetClient) {
-          setSelectedClientId(targetClient.id);
-          localStorage.setItem('nexus_selected_client_id', targetClient.id);
-        }
+    const currentExists = clients.some((c) => c.id === selectedClientId);
+    if (!currentExists) {
+      const defaultClient = clients.find((c) => c.tier === 'pro' && c.isActive) || clients[0];
+      if (defaultClient) {
+        setSelectedClientId(defaultClient.id);
+        localStorage.setItem('nexus_selected_client_id', defaultClient.id);
       }
-
-      if (targetClient) {
-        setApiKey(targetClient.apiKey);
-        const limit = targetClient.rateLimit?.maxRequestsPerMinute || (targetClient.tier === 'pro' ? 60 : targetClient.tier === 'enterprise' ? 1000 : 10);
-        setRateLimitState({
-          limit,
-          remaining: limit,
-        });
-      }
-      isInitialized.current = true;
     }
-  }, [clients]);
+  }, [clients, selectedClientId]);
+
+  // Load the selected client's key into the header input only when the selection itself changes,
+  // so the 5s dashboard refresh never overwrites a key the user typed by hand
+  useEffect(() => {
+    if (selectedClient) setApiKey(selectedClient.apiKey);
+  }, [selectedClient?.id, selectedClient?.apiKey]);
+
+  // Sync rate limiter state with selected client and Redis active windows (on mount, refresh, or metrics update)
+  useEffect(() => {
+    if (!selectedClient) return;
+
+    const tierLimit = selectedClient.rateLimit?.maxRequestsPerMinute || 
+      (selectedClient.tier === 'pro' ? 60 : selectedClient.tier === 'enterprise' ? 1000 : 10);
+
+    // Look for this client in the active Redis windows returned by backend
+    const activeWindows = metrics?.redis?.activeRateLimitWindows || [];
+    const existing = activeWindows.find((w) => w.apiKey === selectedClient.apiKey);
+
+    if (existing && existing.ttlSeconds > 0) {
+      windowExpiresAtRef.current = Date.now() + existing.ttlSeconds * 1000;
+      setIsWindowActive(true);
+      setTtlDisplay(existing.ttlSeconds);
+      setIsRateBlocked(existing.isBlocked);
+      setRateLimitState({
+        limit: existing.maxLimit || tierLimit,
+        remaining: existing.isBlocked ? 0 : (existing.remaining != null ? existing.remaining : Math.max(0, tierLimit - existing.currentCount)),
+      });
+    } else if (!windowExpiresAtRef.current) {
+      // No active Redis window and no ongoing local timer
+      setIsWindowActive(false);
+      setIsRateBlocked(false);
+      setTtlDisplay(60);
+      setRateLimitState({
+        limit: tierLimit,
+        remaining: tierLimit,
+      });
+    }
+  }, [selectedClient, metrics]);
 
   // When user switches client dropdown
   const handleClientChange = (e) => {
     const id = e.target.value;
     setSelectedClientId(id);
     localStorage.setItem('nexus_selected_client_id', id);
-
-    const client = clients.find((c) => c.id === id);
-    if (client) {
-      setApiKey(client.apiKey);
-      const tierLimit = client.rateLimit?.maxRequestsPerMinute || (client.tier === 'pro' ? 60 : client.tier === 'enterprise' ? 1000 : 10);
-
-      // Check if this client already has an active window in Redis metrics
-      const activeWindows = metrics?.redis?.activeRateLimitWindows || [];
-      const existing = activeWindows.find((w) => w.apiKey === client.apiKey);
-
-      setLastResponse(null);
-      setIsRateBlocked(false);
-
-      if (existing && existing.ttlSeconds > 0) {
-        windowExpiresAtRef.current = Date.now() + existing.ttlSeconds * 1000;
-        setIsWindowActive(true);
-        setTtlDisplay(existing.ttlSeconds);
-        setIsRateBlocked(existing.isBlocked);
-        setRateLimitState({
-          limit: existing.maxLimit || tierLimit,
-          remaining: existing.remaining != null ? existing.remaining : Math.max(0, tierLimit - existing.currentCount),
-        });
-      } else {
-        windowExpiresAtRef.current = null;
-        setIsWindowActive(false);
-        setTtlDisplay(60);
-        setRateLimitState({
-          limit: tierLimit,
-          remaining: tierLimit,
-        });
-      }
-    }
+    windowExpiresAtRef.current = null;
+    setLastResponse(null);
+    setIsRateBlocked(false);
   };
 
   const handleToggleCurrentClientStatus = async () => {
@@ -202,13 +196,17 @@ export default function PlaygroundTab({ clients, metrics, onMetricsUpdate }) {
     }
   };
 
+  // Enough requests to exhaust the remaining quota and trigger a 429 (capped so Enterprise never fires 1000)
+  const burstSize = Math.min(Math.max(rateLimitState.remaining + 2, 12), 100);
+
   // Simulate Rapid-Fire Burst Attack to trigger 429
   const handleBurstSimulation = async () => {
+    const total = burstSize;
     setBursting(true);
-    setBurstProgress({ current: 0, total: 12 });
+    setBurstProgress({ current: 0, total });
 
-    for (let i = 1; i <= 12; i++) {
-      setBurstProgress({ current: i, total: 12 });
+    for (let i = 1; i <= total; i++) {
+      setBurstProgress({ current: i, total });
       await executeRequest();
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -372,11 +370,11 @@ export default function PlaygroundTab({ clients, metrics, onMetricsUpdate }) {
               disabled={loading || bursting}
               className="btn btn-warning"
               style={{ flex: 1, minWidth: '160px', padding: '0.75rem 1rem', fontSize: '0.9rem' }}
-              title="Fires 12 rapid requests to intentionally trigger rate limit blocking (429)"
+              title="Fires enough rapid requests to exhaust the remaining quota and trigger rate limit blocking (429)"
             >
               <Flame size={17} />
               <span>
-                {bursting ? `Bursting (${burstProgress?.current}/${burstProgress?.total})...` : '⚡ Simulate Burst (12 Req)'}
+                {bursting ? `Bursting (${burstProgress?.current}/${burstProgress?.total})...` : `⚡ Simulate Burst (${burstSize} Req)`}
               </span>
             </button>
 
